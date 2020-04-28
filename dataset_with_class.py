@@ -21,9 +21,9 @@ class SingleClassData(VisionDataset):
         return len(self.targets)
 
 
-def dataset_with_class():
+def dataset_with_class(train=True):
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-    dataset = datasets.CIFAR100('./data', train=True, transform=transform, download=True)
+    dataset = datasets.CIFAR100('./data', train=train, transform=transform, download=True)
     data_list = []
     for i in range(100):
         index = torch.tensor(dataset.targets) == i
