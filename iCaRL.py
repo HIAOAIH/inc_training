@@ -62,11 +62,12 @@ class ICaRL(object):
 
     def classify(self, x):
         answer = torch.zeros(x.shape[0]).type(torch.LongTensor)
+        answer = answer.cuda() if self.use_gpu else answer
         for i in range(x.shape[0]):
-            feature = self.discriminator(x[i], True)
+            feature = self.discriminator(x[i:i+1], True)
             out = 10000
             class_label = 0
-            for label, exemplar in self.exemplars:
+            for label, exemplar in self.exemplars.items():
                 exemplar.moe = exemplar.moe.cuda() if self.use_gpu else exemplar.moe
                 if out > self.mse_loss(feature, exemplar.moe):
                     out = self.mse_loss(feature, exemplar.moe)
@@ -93,7 +94,7 @@ class ICaRL(object):
             g = self.discriminator(x, classify=False)
             q[index] = g.data
 
-        for i in range(1, epoch + 1):
+        for i in range(epoch):
             if i == 48:
                 self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.lr/5, weight_decay=self.weight_decay)
             elif i == 62:
@@ -113,12 +114,12 @@ class ICaRL(object):
                 if self.class_num == num:
                     loss = self.classification_loss(features[:, -num:], y_one_hot[:, -num:])
                 else:
-                    loss = self.distillation_loss(features[:, :-num], q[:, :-num]) + \
+                    loss = self.distillation_loss(features[:, :-num], q[index, :-num]) + \
                            self.classification_loss(features[:, -num:], y_one_hot[:, -num:])
                 loss.backward()
                 self.d_optimizer.step()
-            if i % 10 == 0:
-                print('process: {} / {} ({:.3f}%)'.format(i, epoch, i / epoch))
+            if i % 10 == 9:
+                print('process: {} / {} ({:.2f}%)'.format((i + 1), epoch, 100 * (i + 1) / epoch))
         print('update is done')
 
     def calculate_mean_of_exemplar(self, exemplar):
@@ -146,7 +147,7 @@ class ICaRL(object):
 
     def construct_exemplar_set(self, input_data, added_class_num, exemplar_num):
         print('constructing exemplar sets')
-        for i in range(1, added_class_num + 1):
+        for i in range(added_class_num):
             label = int(input_data[i].targets[0])
             exemplar = SingleClassData(self.transform, [], [])
 
@@ -156,16 +157,17 @@ class ICaRL(object):
             #  데이터를 한 batch가 아니라 한 개씩 확인해야 함
 
             for j in range(exemplar_num):
-                dl = DataLoader(input_data[i], shuffle=False, batch_size=1)
+                dl = DataLoader(input_data[i], shuffle=False, batch_size=self.batch_size)
                 soe = self.calculate_sum_of_exemplar(exemplar) if j != 0 else 0
                 p = 100000
                 tmp = 0
                 for _, (index, x, y) in enumerate(dl):
                     x = x.cuda() if self.use_gpu else x
                     out = (self.discriminator(x, classify=True) + soe) / (_ + 1)
-                    out = out.view(-1)
-                    if self.mse_loss(mu, out) < p:
-                        tmp = _
+                    for k in range(out.shape[0]):
+                        if self.mse_loss(mu, out[k]) < p:
+                            p = self.mse_loss(mu, out[k])
+                            tmp = int(index[k])
                 exemplar.data = input_data[i].data[tmp:tmp + 1] if j == 0 \
                     else np.concatenate((exemplar.data, input_data[i].data[tmp:tmp + 1]))
                 exemplar.targets = input_data[i].targets[0:1] if j == 0 else torch.cat([exemplar.targets, input_data[i].targets[0:1]])
@@ -175,7 +177,7 @@ class ICaRL(object):
             self.exemplars[label] = exemplar
             self.calculate_mean_of_exemplar(self.exemplars[label])
 
-            print('process: {} / {} ({:.3f}%)'.format(i, added_class_num, i / added_class_num))
+            print('process: {} / {} ({:.2f}%)'.format(i + 1, added_class_num, 100 * (i + 1) / added_class_num))
 
     def distillation_loss(self, x, y):
         loss = self.criterion(x, y)
@@ -191,7 +193,7 @@ class ICaRL(object):
         self.update_representation(70, x, num)
         self.discriminator.eval()
         exemplar_num = self.K // self.class_num
-        print('there will be {} exemplars in each class')
+        print('there will be {} exemplars in each class'.format(exemplar_num))
         if self.class_num != num:
             self.reduce_exemplar_set(exemplar_num)
         self.construct_exemplar_set(x, num, exemplar_num)
@@ -202,9 +204,11 @@ class ICaRL(object):
         data_loader = DataLoader(concat_dataset, shuffle=True, batch_size=self.batch_size)
         correct = 0
         for i, (index, x, y) in enumerate(data_loader):
+            if self.use_gpu:
+                x, y = x.cuda(), y.cuda()
             label = self.classify(x)
-            correct += label.eq(y).sum()
+            correct += label.eq(y).long().cpu().sum() if self.use_gpu else label.eq(y).long().sum()
 
-        print("Accuracy: {}/{} ({:.3f}%)".format(correct, total_num, 100. * correct / total_num))
+        print("Accuracy: {}/{} ({:.2f}%)".format(correct, total_num, 100. * correct / total_num))
 
 

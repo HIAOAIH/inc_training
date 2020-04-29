@@ -1,5 +1,5 @@
 import torch
-
+import os
 import argparse
 from iCaRL import ICaRL
 from dataset_with_class import dataset_with_class
@@ -14,6 +14,7 @@ def parse_args():
     parser.add_argument('--lr', type=float, default='2')
     parser.add_argument('--weight_decay', type=float, default='0.00001')
     parser.add_argument('--use_gpu', type=bool, default=True)
+    parser.add_argument('--network_dir', type=str, default='networks')
 
     return check_args(parser.parse_args())
 
@@ -21,6 +22,8 @@ def parse_args():
 def check_args(args):
     if args.use_gpu:
         args.use_gpu = False if not torch.cuda.is_available() else True
+    if not os.path.exists(args.network_dir):
+        os.makedirs(args.network_dir)
     return args
 
 
@@ -38,7 +41,4 @@ if __name__ == '__main__':
             icarl.train(train_data[trained_class_num:trained_class_num + 10], 10)
             icarl.test(eval_data[trained_class_num:trained_class_num + 10])
             trained_class_num += 10
-
-
-
-
+        torch.save(icarl.discriminator.state_dict(), args.network_dir + '/iCaRL.pt')
