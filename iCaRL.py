@@ -64,7 +64,7 @@ class ICaRL(object):
         answer = torch.zeros(x.shape[0]).type(torch.LongTensor)
         answer = answer.cuda() if self.use_gpu else answer
         for i in range(x.shape[0]):
-            feature = self.discriminator(x[i:i+1], True)
+            feature = self.discriminator(x[i], True)
             out = 10000
             class_label = 0
             for label, exemplar in self.exemplars.items():
