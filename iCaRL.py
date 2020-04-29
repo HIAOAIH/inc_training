@@ -42,19 +42,20 @@ class Exemplar(SingleClassData):
     def __init__(self, transform, data, target):
         super(Exemplar, self).__init__(transform, data, target)
 
-    def store_mean_of_exemplar(self, moe):
-        self.moe = moe
-
 
 class ICaRL(object):
     def __init__(self, args):
-        self.discriminator = RevisedResNet(args.class_num)
-        self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=args.lr, momentum=args.momentum)
+        self.discriminator = RevisedResNet(args.init_class_num)
+        self.lr = args.lr
+        self.weight_decay = args.weight_decay
+        self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         self.criterion = nn.BCELoss()
         self.mse_loss = nn.MSELoss()
-        self.class_num = args.class_num
+        self.class_num = args.init_class_num
         self.exemplars = dict()
         self.K = args.k
+        self.use_gpu = args.use_gpu
+        self.discriminator = self.discriminator.cuda() if self.use_gpu else self.discriminator
 
         self.batch_size = args.batch_size
         self.transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
@@ -66,6 +67,7 @@ class ICaRL(object):
             out = 10000
             class_label = 0
             for label, exemplar in self.exemplars:
+                exemplar.moe = exemplar.moe.cuda() if self.use_gpu else exemplar.moe
                 if out > self.mse_loss(feature, exemplar.moe):
                     out = self.mse_loss(feature, exemplar.moe)
                     class_label = label
@@ -73,69 +75,109 @@ class ICaRL(object):
         return answer
 
     def update_representation(self, epoch, x, num):
+        print('updating representation')
+        self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.discriminator.append_weights(num)
+        self.discriminator.cuda() if self.use_gpu else self.discriminator
         self.class_num += num
-        self.discriminator.train()
 
-        data_loader = DataLoader(ConcatDataset(x + list(self.exemplars.values())), shuffle=True, batch_size=self.batch_size)
-        for i in range(epoch):
-            for _, (x, y) in enumerate(data_loader):
+        dataset = ConcatDataset(x + list(self.exemplars.values()))
+        data_loader = DataLoader(dataset, shuffle=True, batch_size=self.batch_size)
+
+        q = torch.zeros(len(dataset), self.class_num)
+        q = q.cuda() if self.use_gpu else q
+        for _, (index, x, y) in enumerate(data_loader):
+            if self.use_gpu:
+                index = index.cuda()
+                x = x.cuda()
+            g = self.discriminator(x, classify=False)
+            q[index] = g.data
+
+        for i in range(1, epoch + 1):
+            if i == 48:
+                self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.lr/5, weight_decay=self.weight_decay)
+            elif i == 62:
+                self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.lr/25, weight_decay=self.weight_decay)
+
+            for _, (index, x, y) in enumerate(data_loader):
+                if self.use_gpu:
+                    x, y = x.cuda(), y.cuda()
+
                 self.d_optimizer.zero_grad()
                 features = self.discriminator(x, classify=False)
                 y_one_hot = torch.zeros(features.shape[0], self.class_num)
                 y_one_hot[torch.arange(features.shape[0]), y] = 1
-                loss = self.distillation_loss(features[:, :-num], y_one_hot[:, :-num]) + \
-                       self.classification_loss(features[:, -num:], y_one_hot[:, -num:])
+                y_one_hot = y_one_hot.cuda() if self.use_gpu else y_one_hot
+
+                # loss = self.distillation_loss(features[:, :-num], y_one_hot[:, :-num]) + \
+                if self.class_num == num:
+                    loss = self.classification_loss(features[:, -num:], y_one_hot[:, -num:])
+                else:
+                    loss = self.distillation_loss(features[:, :-num], q[:, :-num]) + \
+                           self.classification_loss(features[:, -num:], y_one_hot[:, -num:])
                 loss.backward()
                 self.d_optimizer.step()
-
-    def reduce_exemplar_set(self, exemplar_num):
-        for key in self.exemplars:
-            self.exemplars[key].data = self.exemplars[key].data[:exemplar_num]
-            self.exemplars[key].targets = self.exemplars[key].targets[:exemplar_num]
-            # is it necessary to recalculate moe when reduce exemplar set?
-            self.calculate_mean_of_exemplar(self.exemplars[key])
+            if i % 10 == 0:
+                print('process: {} / {} ({:.3f}%)'.format(i, epoch, i / epoch))
+        print('update is done')
 
     def calculate_mean_of_exemplar(self, exemplar):
         dl = DataLoader(exemplar, shuffle=False, batch_size=exemplar.data.shape[0])
-        data = dl.__iter__().__next__()[0]
-        moe = self.discriminator(data, classify=False).mean(dim=0)
+        data = dl.__iter__().__next__()[1]
+        data = data.cuda() if self.use_gpu else data
+        moe = self.discriminator(data, classify=True).mean(dim=0)
         exemplar.store_mean_of_exemplar(moe)
         return moe
 
     def calculate_sum_of_exemplar(self, exemplar):
         dl = DataLoader(exemplar, shuffle=False, batch_size=exemplar.data.shape[0])
-        data = dl.__iter__().__next__()[0]
-        moe = self.discriminator(data, classify=False).sum(dim=0)
-        return moe
+        data = dl.__iter__().__next__()[1]
+        data = data.cuda() if self.use_gpu else data
+        soe = self.discriminator(data, classify=True).sum(dim=0)
+        return soe
+
+    def reduce_exemplar_set(self, exemplar_num):
+        for key in self.exemplars:
+            self.exemplars[key].data = self.exemplars[key].data[:exemplar_num]
+            self.exemplars[key].targets = self.exemplars[key].targets[:exemplar_num]
+
+            # isn't it necessary to recalculate moe when reduce exemplar set?
+            # self.calculate_mean_of_exemplar(self.exemplars[key])
 
     def construct_exemplar_set(self, input_data, added_class_num, exemplar_num):
-        for i in range(added_class_num):
-            # input_data의 정답 label을 저장
+        print('constructing exemplar sets')
+        for i in range(1, added_class_num + 1):
             label = int(input_data[i].targets[0])
-            exemplar = Exemplar(self.transform, [], [])
+            exemplar = SingleClassData(self.transform, [], [])
+
+            # mu is not a mean of exemplar because input is not exemplar. but can get with the same way
             mu = self.calculate_mean_of_exemplar(input_data[i])
+            # TODO: torch.argmin() 사용할 수 있는지 확인
+            #  데이터를 한 batch가 아니라 한 개씩 확인해야 함
 
             for j in range(exemplar_num):
-                dl = DataLoader(input_data[i], shuffle=False, batch_size=self.batch_size)
+                dl = DataLoader(input_data[i], shuffle=False, batch_size=1)
                 soe = self.calculate_sum_of_exemplar(exemplar) if j != 0 else 0
                 p = 100000
                 tmp = 0
-                for index, (x, y) in enumerate(dl):
-                    out = (self.discriminator(x) + soe) / (index + 1)
+                for _, (index, x, y) in enumerate(dl):
+                    x = x.cuda() if self.use_gpu else x
+                    out = (self.discriminator(x, classify=True) + soe) / (_ + 1)
+                    out = out.view(-1)
                     if self.mse_loss(mu, out) < p:
-                        tmp = index
+                        tmp = _
                 exemplar.data = input_data[i].data[tmp:tmp + 1] if j == 0 \
                     else np.concatenate((exemplar.data, input_data[i].data[tmp:tmp + 1]))
+                exemplar.targets = input_data[i].targets[0:1] if j == 0 else torch.cat([exemplar.targets, input_data[i].targets[0:1]])
                 input_data[i].data = np.concatenate((input_data[i].data[:tmp], input_data[i].data[tmp+1:]))
                 input_data[i].targets = input_data[i].targets[:-1]
-            exemplar.targets = input_data[i].targets[:exemplar_num]
+
             self.exemplars[label] = exemplar
             self.calculate_mean_of_exemplar(self.exemplars[label])
 
+            print('process: {} / {} ({:.3f}%)'.format(i, added_class_num, i / added_class_num))
+
     def distillation_loss(self, x, y):
-        # TODO: 미리 구해둔 q와 y를 곱해야 함
-        # y = y * q
         loss = self.criterion(x, y)
         return loss
 
@@ -144,14 +186,25 @@ class ICaRL(object):
         return loss
 
     def train(self, x, num):
-        # TODO
+        print('training {} classes'.format(self.class_num + num))
+        self.discriminator.train()
         self.update_representation(70, x, num)
+        self.discriminator.eval()
         exemplar_num = self.K // self.class_num
-        self.reduce_exemplar_set(exemplar_num)
+        print('there will be {} exemplars in each class')
+        if self.class_num != num:
+            self.reduce_exemplar_set(exemplar_num)
         self.construct_exemplar_set(x, num, exemplar_num)
 
-    def test(self, image):
-        # TODO
-        self.discriminator.eval()
-        self.classify(image)
-        return
+    def test(self, eval_data):
+        concat_dataset = ConcatDataset(eval_data)
+        total_num = len(concat_dataset)
+        data_loader = DataLoader(concat_dataset, shuffle=True, batch_size=self.batch_size)
+        correct = 0
+        for i, (index, x, y) in enumerate(data_loader):
+            label = self.classify(x)
+            correct += label.eq(y).sum()
+
+        print("Accuracy: {}/{} ({:.3f}%)".format(correct, total_num, 100. * correct / total_num))
+
+

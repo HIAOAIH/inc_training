@@ -11,11 +11,14 @@ class SingleClassData(VisionDataset):
         self.data = data
         self.targets = targets
 
+    def store_mean_of_exemplar(self, moe):
+        self.moe = moe
+
     def __getitem__(self, index):
         img, target = self.data[index], self.targets[index]
         img = Image.fromarray(img)
         img = self.transform(img)
-        return img, target
+        return index, img, target
 
     def __len__(self):
         return len(self.targets)
