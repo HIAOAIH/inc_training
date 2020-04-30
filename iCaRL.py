@@ -17,7 +17,7 @@ class RevisedResNet(ResNet):
     def __init__(self, out_features=0):
         self.out_features = out_features
         super(RevisedResNet, self).__init__(BasicBlock, [3, 4, 6, 3])
-        self.fc = nn.Linear(512, self.out_features, True)
+        self.fc = nn.Linear(512, self.out_features, False)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x, classify=False):
@@ -31,9 +31,9 @@ class RevisedResNet(ResNet):
 
     def append_weights(self, num):
         with torch.no_grad():
-            fc = nn.Linear(512, self.out_features + num, True)
-            fc.weight[:self.out_features] = self.fc.weight
-            fc.bias[:self.out_features] = self.fc.bias
+            fc = nn.Linear(512, self.out_features + num, False)
+            fc.weight[:self.out_features] = self.fc.weight.data
+            # fc.bias[:self.out_features] = self.fc.bias
             self.out_features += num
             self.fc = fc
 
@@ -49,7 +49,7 @@ class ICaRL(object):
         self.lr = args.lr
         self.weight_decay = args.weight_decay
         self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-        self.criterion = nn.BCELoss()
+        self.criterion = nn.BCELoss(reduction='sum')
         self.mse_loss = nn.MSELoss()
         self.class_num = args.init_class_num
         self.exemplars = dict()
@@ -64,45 +64,46 @@ class ICaRL(object):
         answer = torch.zeros(x.shape[0]).type(torch.LongTensor)
         answer = answer.cuda() if self.use_gpu else answer
         for i in range(x.shape[0]):
-            feature = self.discriminator(x[i], True)
+            with torch.no_grad():
+                feature = self.discriminator(x[i:i+1], True)# .requires_grad_(False)
             out = 10000
             class_label = 0
             for label, exemplar in self.exemplars.items():
                 exemplar.moe = exemplar.moe.cuda() if self.use_gpu else exemplar.moe
-                if out > self.mse_loss(feature, exemplar.moe):
-                    out = self.mse_loss(feature, exemplar.moe)
+                norm = self.mse_loss(feature.data, exemplar.moe)
+                if out > norm:
+                    out = norm
                     class_label = label
             answer[i] = class_label
         return answer
 
-    def update_representation(self, epoch, x, num):
+    def update_representation(self, epoch, train_data, num):
         print('updating representation')
         self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.discriminator.append_weights(num)
         self.discriminator.cuda() if self.use_gpu else self.discriminator
         self.class_num += num
 
-        dataset = ConcatDataset(x + list(self.exemplars.values()))
+        dataset = ConcatDataset(train_data + list(self.exemplars.values()))
         data_loader = DataLoader(dataset, shuffle=True, batch_size=self.batch_size)
 
         q = torch.zeros(len(dataset), self.class_num)
         q = q.cuda() if self.use_gpu else q
         for _, (index, x, y) in enumerate(data_loader):
             if self.use_gpu:
-                index = index.cuda()
                 x = x.cuda()
             g = self.discriminator(x, classify=False)
             q[index] = g.data
 
         for i in range(epoch):
-            if i == 48:
+            if i == 49:
                 self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.lr/5, weight_decay=self.weight_decay)
-            elif i == 62:
+            elif i == 63:
                 self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.lr/25, weight_decay=self.weight_decay)
 
             for _, (index, x, y) in enumerate(data_loader):
                 if self.use_gpu:
-                    x, y = x.cuda(), y.cuda()
+                    x = x.cuda()
 
                 self.d_optimizer.zero_grad()
                 features = self.discriminator(x, classify=False)
@@ -126,15 +127,17 @@ class ICaRL(object):
         dl = DataLoader(exemplar, shuffle=False, batch_size=exemplar.data.shape[0])
         data = dl.__iter__().__next__()[1]
         data = data.cuda() if self.use_gpu else data
-        moe = self.discriminator(data, classify=True).mean(dim=0)
-        exemplar.store_mean_of_exemplar(moe)
+        with torch.no_grad():
+            moe = self.discriminator(data, classify=True).mean(dim=0)
+        exemplar.store_mean_of_exemplar(moe.data)
         return moe
 
     def calculate_sum_of_exemplar(self, exemplar):
         dl = DataLoader(exemplar, shuffle=False, batch_size=exemplar.data.shape[0])
         data = dl.__iter__().__next__()[1]
         data = data.cuda() if self.use_gpu else data
-        soe = self.discriminator(data, classify=True).sum(dim=0)
+        with torch.no_grad():
+            soe = self.discriminator(data, classify=True).sum(dim=0)
         return soe
 
     def reduce_exemplar_set(self, exemplar_num):
@@ -154,7 +157,6 @@ class ICaRL(object):
             # mu is not a mean of exemplar because input is not exemplar. but can get with the same way
             mu = self.calculate_mean_of_exemplar(input_data[i])
             # TODO: torch.argmin() 사용할 수 있는지 확인
-            #  데이터를 한 batch가 아니라 한 개씩 확인해야 함
 
             for j in range(exemplar_num):
                 dl = DataLoader(input_data[i], shuffle=False, batch_size=self.batch_size)

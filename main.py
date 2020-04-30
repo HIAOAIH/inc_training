@@ -35,10 +35,11 @@ if __name__ == '__main__':
         icarl = ICaRL(args)
         icarl.train(train_data[:20], 20)
         icarl.test(eval_data[:20])
+        torch.save(icarl.discriminator.state_dict(), args.network_dir + '/iCaRL_' + str(icarl.class_num) + '.pt')
 
         trained_class_num = 20
         for i in range(8):
             icarl.train(train_data[trained_class_num:trained_class_num + 10], 10)
-            icarl.test(eval_data[trained_class_num:trained_class_num + 10])
+            icarl.test(eval_data[:trained_class_num + 10])
             trained_class_num += 10
-        torch.save(icarl.discriminator.state_dict(), args.network_dir + '/iCaRL.pt')
+        torch.save(icarl.discriminator.state_dict(), args.network_dir + '/iCaRL_' + str(icarl.class_num) + '.pt')
