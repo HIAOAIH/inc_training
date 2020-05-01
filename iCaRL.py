@@ -58,6 +58,7 @@ class ICaRL(object):
         self.use_gpu = args.use_gpu
         self.discriminator = self.discriminator.cuda() if self.use_gpu else self.discriminator
 
+        self.epoch = args.epoch
         self.batch_size = args.batch_size
         self.transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
@@ -193,7 +194,7 @@ class ICaRL(object):
     def train(self, x, num):
         print('training {} classes'.format(self.class_num + num))
         self.discriminator.train()
-        self.update_representation(70, x, num)
+        self.update_representation(self.epoch, x, num)
         self.discriminator.eval()
         exemplar_num = self.K // self.class_num
         print('there will be {} exemplars in each class'.format(exemplar_num))

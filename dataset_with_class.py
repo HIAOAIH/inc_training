@@ -25,7 +25,16 @@ class SingleClassData(VisionDataset):
 
 
 def dataset_with_class(train=True):
-    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+    if train:
+        transform = transforms.Compose([transforms.RandomHorizontalFlip(),
+                                        transforms.RandomRotation(10),
+                                        transforms.RandomAffine(0, shear=10, scale=(0.8, 1.2)),
+                                        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+                                        transforms.ToTensor(),
+                                        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))])
+    else:
+        transform = transforms.Compose([transforms.ToTensor(),
+                                        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))])
     dataset = datasets.CIFAR100('./data', train=train, transform=transform, download=True)
     data_list = []
     for i in range(100):

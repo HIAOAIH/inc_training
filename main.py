@@ -8,6 +8,7 @@ from dataset_with_class import dataset_with_class
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--method', type=str, default='icarl', choices=['icarl', 'e2e', 'ls'])
+    parser.add_argument('--epoch', type=int, default='70')
     parser.add_argument('--batch_size', type=int, default='128')
     parser.add_argument('--init_class_num', type=int, default='0')
     parser.add_argument('--k', type=int, default='2000')
