@@ -5,37 +5,38 @@ import torch.optim as optim
 import numpy as np
 
 from torchvision import transforms
-from torchvision.models.resnet import ResNet, BasicBlock
+# from torchvision.models.resnet import ResNet, BasicBlock
 
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import ConcatDataset
 
+from resnet import RevisedResNet
 from dataset_with_class import SingleClassData
 
 
-class RevisedResNet(ResNet):
-    def __init__(self, out_features=0):
-        self.out_features = out_features
-        super(RevisedResNet, self).__init__(BasicBlock, [3, 4, 6, 3])
-        self.fc = nn.Linear(512, self.out_features, False)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x, classify=False):
-        x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
-        x = self.layer4(self.layer3(self.layer2(self.layer1(x))))
-        x = self.avgpool(x).view(-1, 512)
-        if classify:
-            return x
-        else:
-            return self.sigmoid(self.fc(x))
-
-    def append_weights(self, num):
-        with torch.no_grad():
-            fc = nn.Linear(512, self.out_features + num, False)
-            fc.weight[:self.out_features] = self.fc.weight.data
-            # fc.bias[:self.out_features] = self.fc.bias
-            self.out_features += num
-            self.fc = fc
+# class RevisedResNet(ResNet):
+#     def __init__(self, out_features=0):
+#         self.out_features = out_features
+#         super(RevisedResNet, self).__init__(BasicBlock, [3, 4, 6, 3])
+#         self.fc = nn.Linear(512, self.out_features, False)
+#         self.sigmoid = nn.Sigmoid()
+#
+#     def forward(self, x, classify=False):
+#         x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
+#         x = self.layer4(self.layer3(self.layer2(self.layer1(x))))
+#         x = self.avgpool(x).view(-1, 512)
+#         if classify:
+#             return x
+#         else:
+#             return self.sigmoid(self.fc(x))
+#
+#     def append_weights(self, num):
+#         with torch.no_grad():
+#             fc = nn.Linear(512, self.out_features + num, False)
+#             fc.weight[:self.out_features] = self.fc.weight.data
+#             # fc.bias[:self.out_features] = self.fc.bias
+#             self.out_features += num
+#             self.fc = fc
 
 
 class Exemplar(SingleClassData):
@@ -212,5 +213,4 @@ class ICaRL(object):
             correct += label.eq(y).long().cpu().sum() if self.use_gpu else label.eq(y).long().sum()
 
         print("Accuracy: {}/{} ({:.2f}%)".format(correct, total_num, 100. * correct / total_num))
-
 
