@@ -10,7 +10,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import ConcatDataset
 
-from resnet import RevisedResNet
+from resnet import RevisedResNet, ResidualBlock
 from dataset_with_class import SingleClassData
 
 
@@ -46,7 +46,7 @@ class Exemplar(SingleClassData):
 
 class ICaRL(object):
     def __init__(self, args):
-        self.discriminator = RevisedResNet(args.init_class_num)
+        self.discriminator = RevisedResNet(ResidualBlock, [2, 2, 2], args.init_class_num)
         self.lr = args.lr
         self.weight_decay = args.weight_decay
         self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=args.lr, weight_decay=args.weight_decay)
