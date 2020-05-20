@@ -9,12 +9,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from torchvision import transforms
-# from torchvision.models.resnet import ResNet, BasicBlock
 
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import ConcatDataset
 
-# from resnet import RevisedResNet, ResidualBlock
 from resnet_ import ResNet, BasicBlock
 from dataset_with_class import SingleClassData
 
@@ -24,14 +22,9 @@ class RevisedResNet(ResNet):
         self.out_features = out_features
         super(RevisedResNet, self).__init__(BasicBlock, [3, 4, 6, 3])
         self.fc = nn.Linear(512, self.out_features)
-        # self.fc = nn.Linear(512, self.out_features, False)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x, classify=False):
-        # x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
-        # x = self.layer4(self.layer3(self.layer2(self.layer1(x))))
-        # x = self.avgpool(x)
-        # x = torch.flatten(x, 1)
         x = super(RevisedResNet, self).forward(x)
         if classify:
             return x
@@ -41,7 +34,6 @@ class RevisedResNet(ResNet):
     def append_weights(self, num):
         with torch.no_grad():
             fc = nn.Linear(512, self.out_features + num)
-            # fc = nn.Linear(512, self.out_features + num, False)
             fc.weight[:self.out_features] = self.fc.weight.data
             fc.bias[:self.out_features] = self.fc.bias.data
             self.out_features += num
@@ -56,12 +48,9 @@ class Exemplar(SingleClassData):
 class ICaRL(object):
     def __init__(self, args):
         self.discriminator = RevisedResNet(args.init_class_num)
-        # self.discriminator = RevisedResNet(ResidualBlock, [2, 2, 2], args.init_class_num)
         self.lr = args.lr
         self.weight_decay = args.weight_decay
-        # self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-        # self.criterion = nn.BCELoss(reduction='sum')
         self.criterion = nn.BCELoss()
         self.mse_loss = nn.MSELoss()
         self.class_num = args.init_class_num
@@ -95,37 +84,29 @@ class ICaRL(object):
 
     def update_representation(self, train_epoch, train_data, num):
         print('updating representation')
+
+        # 기존에 훈련한 클래스가 있을 때에만 q를 구하도록
+        if self.class_num != 0:
+            self.discriminator.eval()
+            net = copy.deepcopy(self.discriminator)
+            net.eval()
+
         self.discriminator.append_weights(num)
         self.discriminator.cuda(self.device_num) if self.use_gpu else self.discriminator
-        # self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.class_num += num
 
         dataset = ConcatDataset(train_data + list(self.exemplars.values()))
         data_loader = DataLoader(dataset, shuffle=True, batch_size=self.batch_size)
 
-        # 기존에 훈련한 클래스가 있을 때에만 q를 구하도록
-        if self.class_num != num:
-            self.discriminator.eval()
-            net = copy.deepcopy(self.discriminator)
-            net.eval()
-            # q = torch.zeros(len(dataset), self.class_num)
-            # q = q.cuda(self.device_num) if self.use_gpu else q
-            # with torch.no_grad():
-            #     for _, (index, x, y) in enumerate(data_loader):
-            #         if self.use_gpu:
-            #             x = x.cuda(self.device_num)
-            #         g = self.discriminator(x, classify=False)
-            #         q[index] = g.data
-
         self.discriminator.train()
         for i in range(train_epoch):
-            if i == train_epoch * 7 // 10:
-                # self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.lr/5, weight_decay=self.weight_decay)
+            if i == train_epoch * 6 // 10:
                 self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/5, weight_decay=self.weight_decay)
-            elif i == train_epoch * 9 // 10:
-                # self.d_optimizer = optim.Adam(self.discriminator.parameters(), lr=self.lr/25, weight_decay=self.weight_decay)
+            elif i == train_epoch * 8 // 10:
                 self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/25, weight_decay=self.weight_decay)
+            elif i == train_epoch * 9 // 10:
+                self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/125, weight_decay=self.weight_decay)
 
             for _, (index, x, y) in enumerate(data_loader):
                 if self.use_gpu:
@@ -137,28 +118,31 @@ class ICaRL(object):
                 y_one_hot[torch.arange(features.shape[0]), y] = 1
                 y_one_hot = y_one_hot.cuda(self.device_num) if self.use_gpu else y_one_hot
 
-                # loss = self.distillation_loss(features[:, :-num], y_one_hot[:, :-num]) + \
-                classification_loss = self.classification_loss(features[:, -num:], y_one_hot[:, -num:])
-                if self.class_num == num:
-                    distillation_loss = torch.zeros(1)
-                    loss = classification_loss
-                else:
+                distillation_loss = torch.zeros(1)
+                loss = self.criterion(features[..., -num:], y_one_hot[..., -num:])
+                if self.class_num != num:
                     with torch.no_grad():
                         q = net(x, classify=False).data
-                    distillation_loss = self.distillation_loss(features[:, :-num], q[:, :-num])
-                    loss = classification_loss + distillation_loss
+                    # y_one_hot[:, :-num] = q
+                    distillation_loss = self.criterion(features[..., :-num], q)
+                    loss += distillation_loss
 
                 loss.backward()
                 self.d_optimizer.step()
                 if _ % 10 == 0:
-                    print(
-                        'process: {} / {}, classification loss: {:.4f}, distillation_loss: {:.4f}'.format(
-                            (i + 1), train_epoch, classification_loss.item(), distillation_loss.item()))
+                    print('process: {} / {}, loss: {:.4f}, distillation_loss: {:.4f}'.format((i + 1), train_epoch, loss.item(), distillation_loss.item()))
 
         print('update is done')
 
     def calculate_mean_of_exemplar(self, exemplar):
-        dl = DataLoader(exemplar, shuffle=False, batch_size=exemplar.data.shape[0])
+        flipped_exemplar = copy.deepcopy(exemplar)
+        flipped_exemplar.transform = transforms.Compose([
+            transforms.RandomHorizontalFlip(p=1.),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762))])
+
+        dl = DataLoader(ConcatDataset([exemplar, flipped_exemplar]), shuffle=False, batch_size=exemplar.data.shape[0])
+        # dl = DataLoader(exemplar, shuffle=False, batch_size=exemplar.data.shape[0])
         data = dl.__iter__().__next__()[1]
         data = data.cuda(self.device_num) if self.use_gpu else data
         with torch.no_grad():
@@ -176,11 +160,38 @@ class ICaRL(object):
 
     def reduce_exemplar_set(self, exemplar_num):
         for key in self.exemplars:
-            self.exemplars[key].data = self.exemplars[key].data[:exemplar_num]
-            self.exemplars[key].targets = self.exemplars[key].targets[:exemplar_num]
+            # self.exemplars[key].data = self.exemplars[key].data[:exemplar_num]
+            # self.exemplars[key].targets = self.exemplars[key].targets[:exemplar_num]
+            single_class_data = copy.deepcopy(self.exemplars[key])
+            exemplar = SingleClassData(self.transform, [], [])
 
-            # isn't it necessary to recalculate moe when reduce exemplar set?
+            # mu is not a mean of exemplar because input is not exemplar. but can get with the same way
+            mu = self.calculate_mean_of_exemplar(single_class_data)
+
+            for j in range(exemplar_num):
+                dl = DataLoader(single_class_data, shuffle=False, batch_size=self.batch_size)
+                soe = self.calculate_sum_of_exemplar(exemplar) if j != 0 else 0
+                p = 100000
+                tmp = 0
+                for _, (index, x, y) in enumerate(dl):
+                    x = x.cuda(self.device_num) if self.use_gpu else x
+                    out = (self.discriminator(x, classify=True) + soe) / (_ + 1)
+                    for k in range(out.shape[0]):
+                        if self.mse_loss(mu, out[k]) < p:
+                            p = self.mse_loss(mu, out[k])
+                            tmp = int(index[k])
+                exemplar.data = single_class_data.data[tmp:tmp + 1] if j == 0 \
+                    else np.concatenate((exemplar.data, single_class_data.data[tmp:tmp + 1]))
+                exemplar.targets = single_class_data.targets[0:1] if j == 0 else torch.cat(
+                    [exemplar.targets, single_class_data.targets[0:1]])
+                single_class_data.data = np.concatenate(
+                    (single_class_data.data[:tmp], single_class_data.data[tmp + 1:]))
+                single_class_data.targets = single_class_data.targets[:-1]
+
+            self.exemplars[key] = exemplar
             self.calculate_mean_of_exemplar(self.exemplars[key])
+            print('reduce exemplar set: {} / {} ({:.2f}%)'.format(key + 1, len(self.exemplars),
+                                                                  100 * (key + 1) / len(self.exemplars)))
 
     def construct_exemplar_set(self, input_data, added_class_num, exemplar_num):
         print('constructing exemplar sets')
@@ -217,15 +228,8 @@ class ICaRL(object):
             self.exemplars[label] = exemplar
             self.calculate_mean_of_exemplar(self.exemplars[label])
 
-            print('process: {} / {} ({:.2f}%)'.format(i + 1, added_class_num, 100 * (i + 1) / added_class_num))
-
-    def distillation_loss(self, x, y):
-        loss = self.criterion(x, y)
-        return loss
-
-    def classification_loss(self, x, y):
-        loss = self.criterion(x, y)
-        return loss
+            print('construct exemplar set: {} / {} ({:.2f}%)'.format(i + 1, added_class_num,
+                                                                     100 * (i + 1) / added_class_num))
 
     def train(self, x, num):
         print('training {} classes'.format(self.class_num + num))
@@ -250,13 +254,13 @@ class ICaRL(object):
             for i, (index, x, y) in enumerate(data_loader):
                 if self.use_gpu:
                     x, y = x.cuda(self.device_num), y.cuda(self.device_num)
-                label = self.classify(x)
+                prediction = self.classify(x)
 
                 # x축이 실제 데이터, y축이 classify한 결과
-                for n, m in zip(y.view(-1, 1), label.view(-1, 1)):
+                for n, m in zip(y.view(-1, 1), prediction.view(-1, 1)):
                     confusion_matrix[n, m] += 1
 
-                correct += label.eq(y).long().cpu().sum() if self.use_gpu else label.eq(y).long().sum()
+                correct += prediction.eq(y).long().cpu().sum() if self.use_gpu else prediction.eq(y).long().sum()
             confusion_matrix = confusion_matrix.numpy()
             df_cm = pd.DataFrame(confusion_matrix, index=[i for i in range(self.class_num)],
                                  columns=[i for i in range(self.class_num)])
