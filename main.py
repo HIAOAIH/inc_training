@@ -36,30 +36,9 @@ if __name__ == '__main__':
         train_data = dataset_with_class()
         eval_data = dataset_with_class(False)
         icarl = ICaRL(args)
-        # trained_class_num = 0
-        # for i in range(9):
-        #     icarl.train(train_data[trained_class_num:trained_class_num + 10], 10)
-        #     icarl.test(eval_data[:trained_class_num + 10])
-        #     trained_class_num += 10
-        #     torch.save(icarl.discriminator.state_dict(), args.network_dir + '/iCaRL_' + str(icarl.class_num) + '.pt')
-
-        # icarl.train(train_data[:50], 50)
-        # icarl.test(eval_data[:50], True)
-        # icarl.test(train_data[:50], False)
-
-# '''
-        # train 20 classes first
-        icarl.train(train_data[:20], 20)
-        icarl.test(eval_data[:20], True)
-        icarl.test(train_data[:20], False)
-        torch.save(icarl.discriminator.state_dict(), args.network_dir + '/iCaRL_' + str(icarl.class_num) + '.pt')
-
-        trained_class_num = 20
-        for i in range(8):
+        trained_class_num = 0
+        for i in range(10):
             icarl.train(train_data[trained_class_num:trained_class_num + 10], 10)
-            icarl.test(eval_data[:trained_class_num + 10], True)
-            icarl.test(train_data[:trained_class_num + 10], False)
+            icarl.test(eval_data[:trained_class_num + 10])
             trained_class_num += 10
-            
-# '''
-        # torch.save(icarl.discriminator.state_dict(), args.network_dir + '/iCaRL_' + str(icarl.class_num) + '.pt')
+            # torch.save(icarl.discriminator.state_dict(), args.network_dir + '/iCaRL_' + str(icarl.class_num) + '.pt')
