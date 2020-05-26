@@ -4,8 +4,8 @@ import torch.optim as optim
 
 import copy
 import numpy as np
-import seaborn as sn
 import pandas as pd
+import seaborn as sn
 import matplotlib.pyplot as plt
 
 from torchvision import transforms
@@ -13,31 +13,8 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import ConcatDataset
 
-from resnet_ import ResNet, BasicBlock
 from dataset_with_class import SingleClassData
-
-
-class RevisedResNet(ResNet):
-    def __init__(self, out_features=0):
-        self.out_features = out_features
-        super(RevisedResNet, self).__init__(BasicBlock, [3, 4, 6, 3])
-        self.fc = nn.Linear(512, self.out_features)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x, classify=False):
-        x = super(RevisedResNet, self).forward(x)
-        if classify:
-            return x
-        else:
-            return self.sigmoid(self.fc(x))
-
-    def append_weights(self, num):
-        with torch.no_grad():
-            fc = nn.Linear(512, self.out_features + num)
-            fc.weight[:self.out_features] = self.fc.weight.data
-            fc.bias[:self.out_features] = self.fc.bias.data
-            self.out_features += num
-            self.fc = fc
+from RevisedResNet import RevisedResNet
 
 
 class Exemplar(SingleClassData):
@@ -50,7 +27,7 @@ class ICaRL(object):
         self.discriminator = RevisedResNet(args.init_class_num)
         self.lr = args.lr
         self.weight_decay = args.weight_decay
-        self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=0.9)
         self.criterion = nn.BCELoss()
         self.mse_loss = nn.MSELoss()
         self.class_num = args.init_class_num
@@ -93,16 +70,18 @@ class ICaRL(object):
 
         self.discriminator.append_weights(num)
         self.discriminator.cuda(self.device_num) if self.use_gpu else self.discriminator
-        self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr, weight_decay=self.weight_decay, momentum=0.9)
         dataset = ConcatDataset(train_data + list(self.exemplars.values()))
         data_loader = DataLoader(dataset, shuffle=True, batch_size=self.batch_size)
 
         self.discriminator.train()
         for i in range(train_epoch):
             if i == train_epoch * 7 // 10:
-                self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/5, weight_decay=self.weight_decay)
+                self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/5, weight_decay=self.weight_decay, momentum=0.9)
+            elif i == train_epoch * 8 // 10:
+                self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/25, weight_decay=self.weight_decay, momentum=0.9)
             elif i == train_epoch * 9 // 10:
-                self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/25, weight_decay=self.weight_decay)
+                self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/125, weight_decay=self.weight_decay, momentum=0.9)
 
             for _, (index, x, y) in enumerate(data_loader):
                 if self.use_gpu:
@@ -177,7 +156,8 @@ class ICaRL(object):
                             tmp = int(index[k])
                 exemplar.data = single_class_data.data[tmp:tmp + 1] if j == 0 \
                     else np.concatenate((exemplar.data, single_class_data.data[tmp:tmp + 1]))
-                exemplar.targets = single_class_data.targets[0:1] if j == 0 else torch.cat([exemplar.targets, single_class_data.targets[0:1]])
+                exemplar.targets = single_class_data.targets[0:1] if j == 0\
+                    else torch.cat([exemplar.targets, single_class_data.targets[0:1]])
                 single_class_data.data = np.concatenate((single_class_data.data[:tmp], single_class_data.data[tmp+1:]))
                 single_class_data.targets = single_class_data.targets[:-1]
 
@@ -186,7 +166,8 @@ class ICaRL(object):
 
             print('process: {} / {} ({:.2f}%)'.format(i + 1, added_class_num, 100 * (i + 1) / added_class_num))
 
-    def train(self, x, num):
+    def train(self, x):
+        num = len(x)
         print('training {} classes'.format(self.class_num + num))
         self.update_representation(self.train_epoch, x, num)
         self.discriminator.eval()
@@ -222,7 +203,7 @@ class ICaRL(object):
             plt.ylabel('classification result')
             plt.figure(figsize=(7 * self.class_num // 10, 5 * self.class_num // 10))
             sn.heatmap(df_cm, annot=True)
-            plt.savefig('./confusion_matrix/' + t + '_' + str(self.class_num) + '_heatmap.png', dpi=300)
+            plt.savefig('./confusion_matrix/icarl/' + t + '_' + str(self.class_num) + '_heatmap.png', dpi=300)
 
         if eval:
             print("Using test data. Accuracy: {}/{} ({:.2f}%)".format(correct, total_num, 100. * correct / total_num))
