@@ -59,7 +59,7 @@ class ICaRL(object):
             answer[i] = class_label
         return answer
 
-    def update_representation(self, train_epoch, train_data, num):
+    def update_representation(self, train_epoch, train_data, num, momentum):
         print('updating representation')
 
         self.class_num += num
@@ -70,18 +70,18 @@ class ICaRL(object):
 
         self.discriminator.append_weights(num)
         self.discriminator.cuda(self.device_num) if self.use_gpu else self.discriminator
-        self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr, weight_decay=self.weight_decay, momentum=0.9)
+        self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr, weight_decay=self.weight_decay, momentum=momentum)
         dataset = ConcatDataset(train_data + list(self.exemplars.values()))
         data_loader = DataLoader(dataset, shuffle=True, batch_size=self.batch_size)
 
         self.discriminator.train()
         for i in range(train_epoch):
             if i == train_epoch * 7 // 10:
-                self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/5, weight_decay=self.weight_decay, momentum=0.9)
+                self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/5, weight_decay=self.weight_decay, momentum=momentum)
             elif i == train_epoch * 8 // 10:
-                self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/25, weight_decay=self.weight_decay, momentum=0.9)
+                self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/25, weight_decay=self.weight_decay, momentum=momentum)
             elif i == train_epoch * 9 // 10:
-                self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/125, weight_decay=self.weight_decay, momentum=0.9)
+                self.d_optimizer = optim.SGD(self.discriminator.parameters(), lr=self.lr/125, weight_decay=self.weight_decay, momentum=momentum)
 
             for _, (index, x, y) in enumerate(data_loader):
                 if self.use_gpu:
@@ -166,10 +166,10 @@ class ICaRL(object):
 
             print('process: {} / {} ({:.2f}%)'.format(i + 1, added_class_num, 100 * (i + 1) / added_class_num))
 
-    def train(self, x):
+    def train(self, x, momentum):
         num = len(x)
         print('training {} classes'.format(self.class_num + num))
-        self.update_representation(self.train_epoch, x, num)
+        self.update_representation(self.train_epoch, x, num, momentum)
         self.discriminator.eval()
         exemplar_num = self.K // self.class_num
         print('there will be {} exemplars in each class'.format(exemplar_num))
@@ -177,7 +177,7 @@ class ICaRL(object):
             self.reduce_exemplar_set(exemplar_num)
         self.construct_exemplar_set(x, num, exemplar_num)
 
-    def test(self, eval_data, eval=True):
+    def test(self, eval_data, eval):
         concat_dataset = ConcatDataset(eval_data)
         total_num = len(concat_dataset)
         data_loader = DataLoader(concat_dataset, shuffle=True, batch_size=self.batch_size)

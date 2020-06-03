@@ -3,6 +3,7 @@ import os
 import argparse
 from iCaRL import ICaRL
 from E2E import EndToEnd
+from LS import LargeScale
 from dataset_with_class import dataset_with_class
 
 
@@ -45,9 +46,13 @@ if __name__ == '__main__':
     if args.method == 'icarl':
         icarl = ICaRL(args)
         for i in range(10):
-            icarl.train(train_data[trained_class_num:trained_class_num + 10])
-            icarl.test(eval_data[:trained_class_num + 10])
-            icarl.test(train_data[:trained_class_num + 10])
+            if i == 0:
+                momentum = 0
+            else:
+                momentum = 0.9
+            icarl.train(train_data[trained_class_num:trained_class_num + 10], momentum)
+            icarl.test(eval_data[:trained_class_num + 10], True)
+            icarl.test(train_data[:trained_class_num + 10], False)
             trained_class_num += 10
             # torch.save(icarl.discriminator.state_dict(), args.network_dir + '/iCaRL_' + str(icarl.class_num) + '.pt')
 
@@ -58,6 +63,9 @@ if __name__ == '__main__':
             e2e.test(eval_data[:trained_class_num + 10])
             trained_class_num += 10
 
-
-
-
+    elif args.method == 'ls':
+        ls = LargeScale(args)
+        for i in range(10):
+            ls.train(train_data[trained_class_num:trained_class_num + 10], eval_data[:trained_class_num + 10])
+            # ls.test(eval_data[:trained_class_num + 10])
+            trained_class_num += 10
