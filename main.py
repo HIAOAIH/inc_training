@@ -3,7 +3,7 @@ import os
 import argparse
 from iCaRL import ICaRL
 from E2E import EndToEnd
-from LS import LargeScale
+from LS import LargeScale, BicLayer
 from dataset_with_class import dataset_with_class
 
 
@@ -29,6 +29,8 @@ def check_args(args):
         args.use_gpu = False if not torch.cuda.is_available() else True
     if not os.path.exists(args.network_dir):
         os.makedirs(args.network_dir)
+    if not os.path.exists(args.network_dir + '/' + args.method):
+        os.makedirs(args.network_dir + '/' + args.method)
     if not os.path.exists(args.confusion_mat_dir):
         os.makedirs(args.confusion_mat_dir)
     if not os.path.exists(args.confusion_mat_dir + '/' + args.method):
@@ -65,7 +67,16 @@ if __name__ == '__main__':
 
     elif args.method == 'ls':
         ls = LargeScale(args)
-        for i in range(10):
-            ls.train(train_data[trained_class_num:trained_class_num + 10], eval_data[:trained_class_num + 10])
-            # ls.test(eval_data[:trained_class_num + 10])
-            trained_class_num += 10
+        trained_class_num = args.init_class_num
+        if trained_class_num != 0:
+            ls.net.cuda(args.device_num)
+            ls.bias_layers.append(BicLayer())
+            ls.bias_layers[-1].cuda(args.device_num)
+            ls.construct_exemplar_set(train_data[:trained_class_num], 2000 // trained_class_num)
+            ls.test(eval_data[:trained_class_num])
+
+        for i in range((100 - args.init_class_num) // 20):
+            ls.train(train_data[trained_class_num:trained_class_num + 20], eval_data[:trained_class_num + 20])
+            torch.save(ls.net.state_dict(), './networks/ls/large_scale_to_' + str(trained_class_num + 20) + '.pt')
+            ls.test(eval_data[:trained_class_num + 20], save_conf_mat=True)
+            trained_class_num += 20

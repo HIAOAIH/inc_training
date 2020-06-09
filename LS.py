@@ -9,11 +9,35 @@ import pandas as pd
 import seaborn as sn
 import matplotlib.pyplot as plt
 
-from RevisedResNet import RevisedResNet
+from resnet import RevisedResNet
 from dataset_with_class import SingleClassData
 
 from torchvision import transforms
 from torch.utils.data import DataLoader, ConcatDataset
+
+
+class BicLayer(nn.Module):
+    def __init__(self):
+        super(BicLayer, self).__init__()
+        self.alpha = torch.ones(1)
+        self.beta = torch.zeros(1)
+
+    def forward(self, x):
+        return self.alpha * x + self.beta
+
+    def cuda(self, device=0):
+        self.alpha = self.alpha.cuda(device)
+        self.beta = self.beta.cuda(device)
+
+    def train(self, train=True):
+        self.alpha.requires_grad_(train)
+        self.beta.requires_grad_(train)
+
+    def eval(self):
+        self.train(train=False)
+
+    def get_params(self):
+        return [self.alpha, self.beta]
 
 
 class LargeScale(object):
@@ -28,12 +52,23 @@ class LargeScale(object):
         self.use_gpu = args.use_gpu
 
         self.net = RevisedResNet(self.trained_class_num)
+        if self.trained_class_num != 0:
+            self.net.load_state_dict(torch.load('./' + args.network_dir + '/ls/large_scale_to_' + str(self.trained_class_num) + '.pt'))
+        self.bias_layers = []
+
         self.CELoss = nn.CrossEntropyLoss()
         self.MSELoss = nn.MSELoss()
-        self.softmax = nn.Softmax()
+        self.softmax = nn.Softmax(dim=1)
+        self.log_softmax = nn.LogSoftmax(dim=1)
 
         self.exemplars = {}
         self.K = 2000
+
+    def bias_forward(self, x, classes_per_train):
+        output = []
+        for i in range(len(self.bias_layers)):
+            output.append(self.bias_layers[i](x[:, i * classes_per_train: (i + 1) * classes_per_train]))
+        return torch.cat(output, dim=1)
 
     def train(self, train_data, test_data):
         added_class_num = len(train_data)
@@ -49,10 +84,16 @@ class LargeScale(object):
         opt_stage1 = optim.SGD(self.net.parameters(), lr=self.lr, momentum=self.momentum, weight_decay=self.weight_decay)
         scheduler_stage1 = optim.lr_scheduler.MultiStepLR(opt_stage1, milestones=[100, 150, 200], gamma=0.1)
 
-        self.alpha = torch.randn(1).requires_grad_(False)
-        self.beta = torch.randn(1).requires_grad_(False)
+        # self.alpha = torch.randn(1).requires_grad_(False)
+        # self.beta = torch.randn(1).requires_grad_(False)
+        self.bias_layers.append(BicLayer())
+        self.bias_layers[-1].cuda(self.device_num)
+        print('BiC layers')
+        for layer in self.bias_layers:
+            print(layer.get_params())
 
-        opt_stage2 = optim.SGD([self.alpha, self.beta], lr=self.lr, momentum=self.momentum, weight_decay=self.weight_decay)
+        # opt_stage2 = optim.SGD(self.bias_layers[-1].get_params(), lr=self.lr, momentum=self.momentum, weight_decay=self.weight_decay)
+        opt_stage2 = optim.Adam(self.bias_layers[-1].get_params(), lr=self.lr, weight_decay=self.weight_decay)
         scheduler_stage2 = optim.lr_scheduler.MultiStepLR(opt_stage2, milestones=[100, 150, 200], gamma=0.1)
 
         exemplar_train_set = []
@@ -71,9 +112,19 @@ class LargeScale(object):
 
                 train.data = train.data[train_index]
                 train.targets = train.targets[train_index]
+                train.transform = transforms.Compose([
+                    transforms.RandomCrop(32, padding=4),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762))])
 
                 validation.data = validation.data[validation_index]
                 validation.targets = validation.targets[validation_index]
+                validation.transform = transforms.Compose([
+                    transforms.RandomCrop(32, padding=4),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762))])
 
                 exemplar_train_set.append(train)
                 exemplar_validation_set.append(validation)
@@ -106,14 +157,16 @@ class LargeScale(object):
                                             batch_size=self.batch_size)
         # train_data의 일부는 훈련에, 일부는 validation(bias correction)에 사용
 
-        opt_stage2.zero_grad()
+        # self.alpha = self.alpha.cuda(self.device_num)
+        # self.beta = self.beta.cuda(self.device_num)
 
-        self.alpha = self.alpha.cuda(self.device_num)
-        self.beta = self.beta.cuda(self.device_num)
-
-        self.net.train()
         for epoch in range(self.train_epoch):
             # train data
+            self.net.train()
+            self.bias_layers[-1].eval()
+
+            # self.alpha.requires_grad = False
+            # self.beta.requires_grad = False
             for i, (index, images, targets) in enumerate(train_data_loader):
                 images, targets = images.cuda(self.device_num), targets.cuda(self.device_num)
                 opt_stage1.zero_grad()
@@ -136,21 +189,28 @@ class LargeScale(object):
                 # features = features * alpha + beta
 
                 # TODO: stage 1 훈련시에도 alpha, beta 계산을 해야 하는지?
-                out = self.alpha * features.clone()[:, -added_class_num:] + self.beta
-                classification_loss = self.CELoss(torch.cat([features[:, :-added_class_num], out], dim=1), targets)
-                # classification_loss = self.CELoss(features, targets)
+                output = self.bias_forward(features, added_class_num)
+                classification_loss = self.CELoss(output, targets)
+
+                # out = self.alpha * features.clone()[:, -added_class_num:] + self.beta
+                # classification_loss = self.CELoss(torch.cat([features[:, :-added_class_num], out], dim=1), targets)
 
                 if previous_net is not None:
-                    old_features = previous_net(images)
-                    old_exp_features = old_features.exp() ** 0.5
-                    old_exp_softmax = old_exp_features / old_exp_features.sum(dim=1).view(-1, 1)
+                    with torch.no_grad():
+                        old_features = previous_net(images)
+                        old_output = self.bias_forward(old_features, added_class_num)
+                        pi_hat = self.softmax(old_output / 2)
+                    # old_exp_features = old_features.exp() ** 0.5
+                    # old_exp_softmax = old_exp_features / old_exp_features.sum(dim=1).view(-1, 1)
 
-                    exp_features = features[..., :self.trained_class_num].exp() ** 0.5
-                    exp_softmax = exp_features / exp_features.sum(dim=1).view(-1, 1)
+                    # exp_features = features[..., :self.trained_class_num].exp() ** 0.5
+                    # exp_softmax = exp_features / exp_features.sum(dim=1).view(-1, 1)
+                    pi = self.log_softmax(output[..., :self.trained_class_num] / 2)
+
                     # distilling_loss = (-old_exp_softmax * exp_softmax.log()).sum()
-                    distilling_loss = (-old_exp_softmax * exp_softmax.log()).sum(dim=1).mean()
+                    distilling_loss = - (pi_hat * pi).sum(dim=1).mean()
 
-                    loss = (self.trained_class_num / (self.trained_class_num + added_class_num)) * distilling_loss + (
+                    loss = 2 * (self.trained_class_num / (self.trained_class_num + added_class_num)) * distilling_loss + (
                             added_class_num / (self.trained_class_num + added_class_num)) * classification_loss
                 else:
                     loss = classification_loss
@@ -162,32 +222,39 @@ class LargeScale(object):
                         (epoch + 1), self.train_epoch, loss.item(), classification_loss.item()))
             scheduler_stage1.step(epoch)
 
-            if epoch // 10 == 9:
-                self.test(test_data)
+            # if epoch % 10 == 9:
+            #     self.test(test_data)
 
-        self.net.eval()
-        self.alpha.requires_grad = True
-        self.beta.requires_grad = True
-        for epoch in range(self.train_epoch):
+            self.net.eval()
+            self.bias_layers[-1].train()
+            # self.alpha.requires_grad = True
+            # self.beta.requires_grad = True
+        # for epoch in range(self.train_epoch):
             # validation data
-            for i, (index, images, targets) in enumerate(validation_data_loader):
-                images, targets = images.cuda(self.device_num), targets.cuda(self.device_num)
-                # opt_stage1.zero_grad()
-                opt_stage2.zero_grad()
+            if len(self.bias_layers) > 1 and epoch > 149:
+                for i, (index, images, targets) in enumerate(validation_data_loader):
+                    images, targets = images.cuda(self.device_num), targets.cuda(self.device_num)
+                    # opt_stage1.zero_grad()
+                    opt_stage2.zero_grad()
 
-                features = self.net(images)
-                # features = alpha_mat * features + beta_mat
-                out = self.alpha * features.clone()[:, -added_class_num:] + self.beta
-                bias_loss = self.CELoss(torch.cat([features[:, :-added_class_num], out], dim=1), targets)
+                    features = self.net(images)
+                    # features = alpha_mat * features + beta_mat
+                    # out = self.alpha * features.clone()[:, -added_class_num:] + self.beta
+                    output = self.bias_forward(features, added_class_num)
+                    bias_loss = self.CELoss(output, targets)
+                    # bias_loss = self.CELoss(torch.cat([features[:, :-added_class_num], out], dim=1), targets)
 
-                # features[:, -added_class_num:] = alpha * features[:, -added_class_num:] + beta
-                # bias_loss = self.CELoss(features, targets)
-                bias_loss.backward()
-                opt_stage2.step()
-                print('process: {} / {}, bias loss: {:.4f}'.format((epoch + 1), self.train_epoch, bias_loss.item()))
-            scheduler_stage2.step(epoch)
+                    # features[:, -added_class_num:] = alpha * features[:, -added_class_num:] + beta
+                    # bias_loss = self.CELoss(features, targets)
+                    bias_loss.backward()
+                    opt_stage2.step()
+                    print('process: {} / {}, bias loss: {:.4f}'.format((epoch + 1), self.train_epoch, bias_loss.item()))
+                scheduler_stage2.step(epoch)
 
-            if epoch // 10 == 9:
+            if epoch % 10 == 9:
+                print('process: {} / {}, BiC layers: '.format((epoch + 1), self.train_epoch))
+                for layer in self.bias_layers:
+                    print(layer.get_params())
                 self.test(test_data)
 
         self.trained_class_num += added_class_num
@@ -198,39 +265,54 @@ class LargeScale(object):
         self.construct_exemplar_set(train_data, exemplar_num)
 
     # test 코드
-    def test(self, test_data):
+    def test(self, test_data, save_conf_mat=False):
         self.net.eval()
-        dataset = ConcatDataset(test_data)
-        data_loader = DataLoader(dataset, shuffle=True, batch_size=self.batch_size)
-        total = len(dataset)
-        correct = 0
+        self.bias_layers[-1].eval()
 
-        confusion_matrix = torch.zeros(self.trained_class_num, self.trained_class_num).type(torch.long)
+        # dataset = ConcatDataset(test_data)
+        # data_loader = DataLoader(dataset, shuffle=True, batch_size=self.batch_size)
+        # total = len(dataset)
+        total_correct = 0
+        total_dataset_len = 0
+
+        # confusion_matrix = torch.zeros(self.trained_class_num, self.trained_class_num).type(torch.long)
 
         with torch.no_grad():
-            for _, (index, x, y) in enumerate(data_loader):
-                if self.use_gpu:
-                    x, y = x.cuda(self.device_num), y.cuda(self.device_num)
-                output = self.net(x)
-                # TODO: 10: added_class_num -> 따로 저장해둬야
-                output[:, -10:] = self.alpha * output[:, -10:] + self.beta
+            for i in range(len(test_data) // 20):
+                dataset = ConcatDataset(test_data[20 * i: 20 * (i + 1)])
+                data_loader = DataLoader(dataset, shuffle=True, batch_size=self.batch_size)
+                dataset_len = len(dataset)
+                correct = 0
 
-                label = self.softmax(output).argmax(dim=1)
+                for _, (index, x, y) in enumerate(data_loader):
+                    if self.use_gpu:
+                        x, y = x.cuda(self.device_num), y.cuda(self.device_num)
+                    output = self.net(x)
+                    # TODO: 10: added_class_num -> 따로 저장해둬야
+                    output = self.bias_forward(output, 20)
+                    label = self.softmax(output).argmax(dim=1)
 
-                for n, m in zip(y.view(-1, 1), label.view(-1, 1)):
-                    confusion_matrix[n, m] += 1
+                    # if save_conf_mat:
+                    #     for n, m in zip(y.view(-1, 1), label.view(-1, 1)):
+                    #         confusion_matrix[n, m] += 1
 
-                correct += label.eq(y).long().cpu().sum() if self.use_gpu else label.eq(y).long().sum()
-            confusion_matrix = confusion_matrix.numpy()
-            df_cm = pd.DataFrame(confusion_matrix, index=[i for i in range(self.trained_class_num)],
-                                 columns=[i for i in range(self.trained_class_num)])
-            plt.xlabel('real label')
-            plt.ylabel('classification result')
-            plt.figure(figsize=(7 * self.trained_class_num // 10, 5 * self.trained_class_num // 10))
-            sn.heatmap(df_cm, annot=True)
-            plt.savefig('./confusion_matrix/ls/' + str(self.trained_class_num) + '_heatmap.png', dpi=300)
+                    correct += label.eq(y).long().cpu().sum() if self.use_gpu else label.eq(y).long().sum()
+                print("Accuracy: {}/{} ({:.2f}%)".format(correct, dataset_len, 100. * correct / dataset_len))
 
-        print("Accuracy: {}/{} ({:.2f}%)".format(correct, total, 100. * correct / total))
+                total_correct += correct
+                total_dataset_len += dataset_len
+
+            # if save_conf_mat:
+            #     confusion_matrix = confusion_matrix.numpy()
+            #     df_cm = pd.DataFrame(confusion_matrix, index=[i for i in range(self.trained_class_num)],
+            #                          columns=[i for i in range(self.trained_class_num)])
+            #     plt.xlabel('real label')
+            #     plt.ylabel('classification result')
+            #     plt.figure(figsize=(7 * self.trained_class_num // 10, 5 * self.trained_class_num // 10))
+            #     sn.heatmap(df_cm, annot=True)
+            #     plt.savefig('./confusion_matrix/ls/' + str(self.trained_class_num) + '_heatmap.png', dpi=300)
+
+        print("Total Accuracy: {}/{} ({:.2f}%)".format(total_correct, total_dataset_len, 100. * total_correct / total_dataset_len))
 
     # exemplar
     def construct_exemplar_set(self, train_data, exemplar_num):
